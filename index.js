@@ -288,24 +288,6 @@ app.get("/api/fuel-check", async (req, res) => {
 
 
 // ===============================
-// 6) MERKEZI YAKIT OTOMASYONU V5
-// ===============================
-const { installFuelAutomation } = require("./fuelAutomation");
-async function getAutomationFuelPrice(ref) {
-    if (ref.provider === "Shell") return (await fetchShellPrice(ref.city, ref.district, ref.fuel)).price;
-    const url = `https://www.petrolofisi.com.tr/akaryakit-fiyatlari/${citySlug(ref.city)}-akaryakit-fiyatlari`;
-    const upstream = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0", "Accept": "text/html", "Accept-Language": "tr-TR,tr;q=0.9" }, redirect: "follow" });
-    const html = await upstream.text();
-    if (!upstream.ok) throw new Error(`Petrol Ofisi HTTP ${upstream.status}`);
-    // BİM için Supabase'teki eski kural kaydında vatIncluded alanı olmasa bile
-    // sözleşme gereği KDV dahil seçeneği HER ZAMAN kapalıdır.
-    const isBim = String(ref.customer || "").trim().toLocaleUpperCase("tr-TR") === "BİM" || String(ref.customer || "").trim().toUpperCase() === "BIM";
-    const vatIncluded = isBim ? false : ref.vatIncluded !== false;
-    return parsePetrolOfisiPrice(html, ref.district, ref.fuel, ref.city, vatIncluded);
-}
-installFuelAutomation(app, getAutomationFuelPrice);
-
-// ===============================
 // FUEL SERVICE — Render live backend
 // ===============================
 const fuelText = (html = "") => String(html)
@@ -415,30 +397,6 @@ async function fetchFuelPrice({ provider, city, district, fuel = "Motorin", vatI
     providerName: "Petrol Ofisi"
   };
 }
-
-app.get("/api/fuel-check", async (req, res) => {
-  res.set("Cache-Control", "no-store");
-  try {
-    const provider = String(req.query.provider || "").trim().toLowerCase();
-    const city = String(req.query.city || "").trim();
-    const district = String(req.query.district || "").trim();
-    const fuel = String(req.query.fuel || "Motorin").trim();
-    const vatIncluded = String(req.query.vatIncluded ?? "true").toLowerCase() !== "false";
-
-    if (!["petrol-ofisi","shell"].includes(provider) || !city || !district)
-      return res.status(400).json({ ok:false, error:"provider, city ve district zorunludur." });
-
-    const result = await fetchFuelPrice({ provider, city, district, fuel, vatIncluded });
-    res.json({
-      ok:true, provider:result.providerName, city, district, fuel,
-      price:result.price, vatIncluded, sourceUrl:result.sourceUrl,
-      checkedAt:new Date().toISOString()
-    });
-  } catch (error) {
-    console.error("[fuel-check]", error.message);
-    res.status(502).json({ ok:false, error:error.message });
-  }
-});
 
 const fuelTargets = [
   { customer:"BİM", provider:"petrol-ofisi", city:"İstanbul", district:"SANCAKTEPE", fuel:"Motorin", vatIncluded:false },

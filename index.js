@@ -2,118 +2,575 @@ const express = require("express");
 const fetch = require("node-fetch");
 const cors = require("cors");
 const path = require("path");
-// .env dosyasını process.cwd() yerine doğrudan server klasöründen yükle.
-// Böylece `npm --prefix server start` ve farklı çalışma dizinlerinde aynı davranır.
+const helmet = require("helmet");
+const cookieParser = require("cookie-parser");
+const adminUsersRouter = require("./auth/adminUsers");
+const dataApiRouter = require("./auth/dataApi");
+const { request: supabaseRequest } = require("./auth/supabase");
+// .env dosyasÄ±nÄ± process.cwd() yerine doÄŸrudan server klasÃ¶rÃ¼nden yÃ¼kle.
+// BÃ¶ylece `npm --prefix server start` ve farklÄ± Ã§alÄ±ÅŸma dizinlerinde aynÄ± davranÄ±r.
 const envPath = path.resolve(__dirname, ".env");
 require("dotenv").config({ path: envPath, override: true });
 
 const app = express();
-app.use(cors());
-app.use(express.json());
+
+app.set("trust proxy", 1);
+
+app.use(
+    helmet({
+        crossOriginResourcePolicy: {
+            policy: "cross-origin",
+        },
+    })
+);
+
+const allowedOrigins = new Set([
+    "https://tedarik-analiz.vercel.app",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]);
+
+app.use(
+    cors({
+        origin(origin, callback) {
+            // Origin olmayan server-to-server / same-origin istekleri engelleme.
+            if (!origin) {
+                return callback(null, true);
+            }
+
+            if (allowedOrigins.has(origin)) {
+                return callback(null, true);
+            }
+
+            return callback(
+                new Error("CORS origin not allowed.")
+            );
+        },
+        credentials: true,
+        methods: [
+            "GET",
+            "POST",
+            "PUT",
+            "PATCH",
+            "DELETE",
+            "OPTIONS",
+        ],
+        allowedHeaders: [
+            "Content-Type",
+            "Authorization",
+        ],
+    })
+);
+
+app.use(cookieParser());
+
+app.use(
+    express.json({
+        limit: "1mb",
+    })
+);
+
+// ===============================
+// 2FA AUTHENTICATION
+// ===============================
+require("./auth2fa").install(app);
+
+const {
+    requireAuth,
+} = require("./auth/middleware");
+
+const {
+    tmsFetch,
+} = require("./auth/reelTms");
+
+const {
+    revokeSession,
+    revokeAllUserSessions,
+    clearSessionCookie,
+} = require("./auth/session");
+
+const {
+    writeSecurityEvent,
+} = require("./auth/audit");
+
+
+app.get(
+    "/api/auth/session",
+    requireAuth,
+    async (req, res) => {
+        try {
+            const userKey =
+                String(req.auth.userKey);
+
+            const rows =
+                await supabaseRequest(
+                    `Login?id=eq.${encodeURIComponent(userKey)}` +
+                    `&select=id,kullanici_adi,kullanici,rol,allowedScreens,allowedButtons` +
+                    `&limit=1`
+                );
+
+            const row =
+                Array.isArray(rows) && rows.length
+                    ? rows[0]
+                    : null;
+
+            if (!row) {
+                return res.status(401).json({
+                    ok: false,
+                    authenticated: false,
+                    error: "Oturum kullanicisi bulunamadi.",
+                });
+            }
+
+            const parseArray = (value) => {
+                if (Array.isArray(value)) {
+                    return value;
+                }
+
+                if (
+                    value === null ||
+                    value === undefined ||
+                    value === ""
+                ) {
+                    return [];
+                }
+
+                if (typeof value === "string") {
+                    try {
+                        const parsed =
+                            JSON.parse(value);
+
+                        return Array.isArray(parsed)
+                            ? parsed
+                            : [];
+                    } catch {
+                        return [];
+                    }
+                }
+
+                return [];
+            };
+
+            const user = {
+                id:
+                    row.id,
+
+                kullanici_adi:
+                    row.kullanici_adi || "",
+
+                kullanici:
+                    row.kullanici || "",
+
+                rol:
+                    row.rol || "kullanici",
+
+                allowedScreens:
+                    parseArray(
+                        row.allowedScreens
+                    ),
+
+                allowedButtons:
+                    parseArray(
+                        row.allowedButtons
+                    ),
+            };
+
+            res.set(
+                "Cache-Control",
+                "no-store"
+            );
+
+            return res.json({
+                ok: true,
+                authenticated: true,
+                userKey,
+                user,
+            });
+        } catch (error) {
+            console.error(
+                "[AUTH SESSION]",
+                error?.message
+            );
+
+            return res.status(500).json({
+                ok: false,
+                authenticated: false,
+                error:
+                    "Oturum bilgisi alinamadi.",
+            });
+        }
+    }
+);
+
+
+app.post(
+    "/api/auth/logout",
+    requireAuth,
+    async (req, res) => {
+        try {
+            await revokeSession(
+                req.auth.sessionId,
+                "logout"
+            );
+
+            clearSessionCookie(res);
+
+            await writeSecurityEvent({
+                req,
+                userKey: req.auth.userKey,
+                eventType: "LOGOUT",
+                success: true,
+            });
+
+            return res.json({
+                ok: true,
+            });
+        } catch (error) {
+            console.error(
+                "[LOGOUT]",
+                error?.message
+            );
+
+            return res.status(500).json({
+                error:
+                    "Cikis islemi tamamlanamadi.",
+            });
+        }
+    }
+);
+
+
+app.post(
+    "/api/auth/logout-all",
+    requireAuth,
+    async (req, res) => {
+        try {
+            await revokeAllUserSessions(
+                req.auth.userKey,
+                "logout_all"
+            );
+
+            clearSessionCookie(res);
+
+            await writeSecurityEvent({
+                req,
+                userKey: req.auth.userKey,
+                eventType: "LOGOUT_ALL",
+                success: true,
+            });
+
+            return res.json({
+                ok: true,
+            });
+        } catch (error) {
+            console.error(
+                "[LOGOUT ALL]",
+                error?.message
+            );
+
+            return res.status(500).json({
+                error:
+                    "Tum oturumlar kapatilamadi.",
+            });
+        }
+    }
+);
 
 const PORT = process.env.PORT || 5000;
-console.log(`🔐 Supabase env: URL=${Boolean(process.env.SUPABASE_URL)} KEY=${Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY)}`);
+console.log(`ğŸ” Supabase env: URL=${Boolean(process.env.SUPABASE_URL)} KEY=${Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY)}`);
 
-// ===============================
-// 1) TMS PROD / ADD EXPENSE
-// ===============================
-app.post("/api/reel-api/tmsdespatchincomeexpenses/addexpense", async (req, res) => {
-    try {
-        const upstream = await fetch(
-            "https://tms.odaklojistik.com.tr/api/tmsdespatchincomeexpenses/addexpense",
-            {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    Authorization: req.headers.authorization || "",
-                },
-                body: JSON.stringify(req.body),
-            }
-        );
+app.post(
+    "/api/reel-api/tmsdespatchincomeexpenses/addexpense",
+    requireAuth,
+    async (req, res) => {
+        try {
+            const upstream = await tmsFetch(
+                req.auth.userKey,
+                "/api/tmsdespatchincomeexpenses/addexpense",
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify(req.body ?? {}),
+                }
+            );
 
-        const text = await upstream.text();
-        res.status(upstream.status).send(text);
-    } catch (err) {
-        res.status(500).json({ error: "Proxy error", detail: err.message });
+            const text = await upstream.text();
+
+            res
+                .status(upstream.status)
+                .type(
+                    upstream.headers.get("content-type") ||
+                    "application/json"
+                )
+                .send(text);
+        } catch (err) {
+            console.error(
+                "TMS addexpense proxy error:",
+                err?.message || "Unknown error"
+            );
+
+            res
+                .status(err?.status || 502)
+                .json({
+                    error: "TMS istegi tamamlanamadi.",
+                });
+        }
     }
-});
+);
 
 // ===============================
 // 2) TMS PROD / ADD INCOME
 // ===============================
-app.post("/api/reel-api/tmsdespatchincomeexpenses/addincome", async (req, res) => {
-    try {
-        const upstream = await fetch(
-            "https://tms.odaklojistik.com.tr/api/tmsdespatchincomeexpenses/addincome",
-            {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    Authorization: req.headers.authorization || "",
+app.post(
+    "/api/reel-api/tmsdespatchincomeexpenses/addincome",
+    requireAuth,
+    async (req, res) => {
+        try {
+            const upstream = await tmsFetch(
+                req.auth.userKey,
+                "/api/tmsdespatchincomeexpenses/addincome",
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify(req.body ?? {}),
+                }
+            );
+
+            const text = await upstream.text();
+
+            res
+                .status(upstream.status)
+                .type(
+                    upstream.headers.get("content-type") ||
+                    "application/json"
+                )
+                .send(text);
+        } catch (err) {
+            console.error(
+                "TMS addincome proxy error:",
+                err?.message || "Unknown error"
+            );
+
+            res
+                .status(err?.status || 502)
+                .json({
+                    error: "TMS istegi tamamlanamadi.",
+                });
+        }
+    }
+);
+
+// ===============================
+// 3) TMS PROD / ADD ORDER  âœ… YENÄ°
+// ===============================
+// ===============================
+// TMS TEST / ADD EXPENSE
+// ===============================
+app.post(
+    "/api/reel-api/tmsdespatchincomeexpenses/test/testaddexpense",
+    requireAuth,
+    async (req, res) => {
+        try {
+            const upstream = await tmsFetch(
+                req.auth.userKey,
+                "/api/tmsdespatchincomeexpenses/test/testaddexpense",
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify(req.body ?? {}),
                 },
-                body: JSON.stringify(req.body),
-            }
-        );
+                {
+                    environment: "test",
+                }
+            );
 
-        const text = await upstream.text();
-        res.status(upstream.status).send(text);
-    } catch (err) {
-        res.status(500).json({ error: "Proxy error", detail: err.message });
+            const text = await upstream.text();
+
+            res
+                .status(upstream.status)
+                .type(
+                    upstream.headers.get("content-type") ||
+                    "application/json"
+                )
+                .send(text);
+        } catch (err) {
+            console.error(
+                "TEST TMS addexpense proxy error:",
+                err?.message || "Unknown error"
+            );
+
+            res
+                .status(err?.status || 502)
+                .json({
+                    error: "TEST TMS istegi tamamlanamadi.",
+                });
+        }
     }
-});
+);
 
 // ===============================
-// 3) TMS PROD / ADD ORDER  ✅ YENİ
+// TMS TEST / ADD INCOME
 // ===============================
-app.post("/api/reel-api/tmsorders/add", async (req, res) => {
-    try {
-        const upstream = await fetch(
-            "https://tms.odaklojistik.com.tr/api/tmsorders/add",
-            {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    Authorization: req.headers.authorization || "",
+app.post(
+    "/api/reel-api/tmsdespatchincomeexpenses/test/testaddincome",
+    requireAuth,
+    async (req, res) => {
+        try {
+            const upstream = await tmsFetch(
+                req.auth.userKey,
+                "/api/tmsdespatchincomeexpenses/test/testaddincome",
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify(req.body ?? {}),
                 },
-                body: JSON.stringify(req.body),
+                {
+                    environment: "test",
+                }
+            );
+
+            const text = await upstream.text();
+
+            res
+                .status(upstream.status)
+                .type(
+                    upstream.headers.get("content-type") ||
+                    "application/json"
+                )
+                .send(text);
+        } catch (err) {
+            console.error(
+                "TEST TMS addincome proxy error:",
+                err?.message || "Unknown error"
+            );
+
+            res
+                .status(err?.status || 502)
+                .json({
+                    error: "TEST TMS istegi tamamlanamadi.",
+                });
+        }
+    }
+);
+app.post(
+    "/api/reel-api/tmsorders/add",
+    requireAuth,
+    async (req, res) => {
+        try {
+            const upstream = await tmsFetch(
+                req.auth.userKey,
+                "/api/tmsorders/add",
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify(req.body ?? {}),
+                }
+            );
+
+            const text = await upstream.text();
+
+            res
+                .status(upstream.status)
+                .type(
+                    upstream.headers.get("content-type") ||
+                    "application/json"
+                )
+                .send(text);
+        } catch (err) {
+            console.error(
+                "TMS addorder proxy error:",
+                err?.message || "Unknown error"
+            );
+
+            res
+                .status(err?.status || 502)
+                .json({
+                    error: "TMS istegi tamamlanamadi.",
+                });
+        }
+    }
+);
+
+
+// ===============================
+// TMS ORDERS / GET ALL - PRICING
+// ===============================
+app.post(
+    "/api/fiyatlandirma/tmsorders/getall",
+    requireAuth,
+    async (req, res) => {
+        try {
+            const odakApiKey =
+                process.env.ODAK_API_KEY;
+
+            if (!odakApiKey) {
+                return res.status(500).json({
+                    error: "Sunucu API yapilandirmasi eksik.",
+                });
             }
-        );
 
-        const text = await upstream.text();
-        res.status(upstream.status).send(text);
-    } catch (err) {
-        res.status(500).json({ error: "Order proxy error", detail: err.message });
+            const upstream = await fetch(
+                "https://api.odaklojistik.com.tr/api/tmsorders/getall",
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        Accept: "application/json",
+                        Authorization: odakApiKey,
+                    },
+                    body: JSON.stringify({
+                        startDate: req.body?.startDate,
+                        endDate: req.body?.endDate,
+                        userId: 1,
+                    }),
+                }
+            );
+
+            const text = await upstream.text();
+
+            res.set(
+                "Cache-Control",
+                "no-store"
+            );
+
+            return res
+                .status(upstream.status)
+                .type(
+                    upstream.headers.get("content-type") ||
+                    "application/json"
+                )
+                .send(text);
+        } catch (err) {
+            console.error(
+                "Pricing TMS GetAll error:",
+                err?.message || "Unknown error"
+            );
+
+            return res.status(502).json({
+                error: "TMS siparis verisi alinamadi.",
+            });
+        }
     }
-});
-
-// ===============================
-// 4) TMS AUTH LOGIN (PROD)
-// ===============================
-app.post("/reel-auth/api/auth/login", async (req, res) => {
-    try {
-        const upstream = await fetch("https://tms.odaklojistik.com.tr/api/auth/login", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(req.body ?? {}),
-        });
-
-        const text = await upstream.text();
-        res.status(upstream.status).send(text);
-    } catch (err) {
-        res.status(500).json({ error: "Auth proxy error", detail: err.message });
-    }
-});
-
-
+);
 // ===============================
 // 5) PETROL OFISI / FUEL PRICE CHECK
 // ===============================
 const trAscii = (value = "") => String(value)
     .trim()
     .toLocaleUpperCase("tr-TR")
-    .replace(/İ/g, "I").replace(/İ/g, "I")
-    .replace(/Ş/g, "S").replace(/Ğ/g, "G")
-    .replace(/Ü/g, "U").replace(/Ö/g, "O").replace(/Ç/g, "C")
+    .replace(/Ä°/g, "I").replace(/IÌ‡/g, "I")
+    .replace(/Å/g, "S").replace(/Ä/g, "G")
+    .replace(/Ãœ/g, "U").replace(/Ã–/g, "O").replace(/Ã‡/g, "C")
     .normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 
 const citySlug = (value = "") => trAscii(value)
@@ -126,12 +583,12 @@ const decodeHtml = (value = "") => String(value)
     .replace(/&amp;/gi, "&")
     .replace(/&quot;/gi, '"')
     .replace(/&#39;|&apos;/gi, "'")
-    .replace(/&ccedil;/gi, "ç").replace(/&Ccedil;/gi, "Ç")
-    .replace(/&ouml;/gi, "ö").replace(/&Ouml;/gi, "Ö")
-    .replace(/&uuml;/gi, "ü").replace(/&Uuml;/gi, "Ü")
-    .replace(/&#287;/g, "ğ").replace(/&#286;/g, "Ğ")
-    .replace(/&#351;/g, "ş").replace(/&#350;/g, "Ş")
-    .replace(/&#305;/g, "ı").replace(/&#304;/g, "İ");
+    .replace(/&ccedil;/gi, "Ã§").replace(/&Ccedil;/gi, "Ã‡")
+    .replace(/&ouml;/gi, "Ã¶").replace(/&Ouml;/gi, "Ã–")
+    .replace(/&uuml;/gi, "Ã¼").replace(/&Uuml;/gi, "Ãœ")
+    .replace(/&#287;/g, "ÄŸ").replace(/&#286;/g, "Ä")
+    .replace(/&#351;/g, "ÅŸ").replace(/&#350;/g, "Å")
+    .replace(/&#305;/g, "Ä±").replace(/&#304;/g, "Ä°");
 
 const textOnly = (html = "") => decodeHtml(html)
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
@@ -147,8 +604,8 @@ const firstPrice = (value = "") => {
 
 function parsePetrolOfisiPrice(html, district, fuel, city = "", vatIncluded = true) {
     const wantedDistrict = trAscii(district);
-    // Petrol Ofisi bazı illerde merkez satırını "MERKEZ" yerine doğrudan il adıyla yayımlıyor.
-    // Örn: Eskişehir merkez = ESKISEHIR, Adana merkez = ADANA.
+    // Petrol Ofisi bazÄ± illerde merkez satÄ±rÄ±nÄ± "MERKEZ" yerine doÄŸrudan il adÄ±yla yayÄ±mlÄ±yor.
+    // Ã–rn: EskiÅŸehir merkez = ESKISEHIR, Adana merkez = ADANA.
     const acceptedDistricts = new Set([wantedDistrict]);
     if (wantedDistrict === "MERKEZ" && city) acceptedDistricts.add(trAscii(city));
     const rows = [...html.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)];
@@ -156,23 +613,23 @@ function parsePetrolOfisiPrice(html, district, fuel, city = "", vatIncluded = tr
         const cells = [...row[1].matchAll(/<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi)].map(m => textOnly(m[1]));
         if (cells.length < 4 || !acceptedDistricts.has(trAscii(cells[0]))) continue;
         const index = fuel === "Benzin" ? 1 : fuel === "Motorin" ? 2 : fuel === "LPG" ? 6 : -1;
-        if (index < 0 || !cells[index]) throw new Error(`Desteklenmeyen yakıt türü: ${fuel}`);
+        if (index < 0 || !cells[index]) throw new Error(`Desteklenmeyen yakÄ±t tÃ¼rÃ¼: ${fuel}`);
         const matches = String(cells[index]).match(/\d{1,3}(?:[.,]\d{1,2})/g) || [];
-        // Petrol Ofisi hücresinde ilk değer KDV dahil, ikinci değer +KDV (KDV hariç) olarak yayınlanır.
-        // BİM sözleşmesi için "KDV dahil fiyatlar gösterilsin" kapalı olduğundan ikinci değer kullanılır.
+        // Petrol Ofisi hÃ¼cresinde ilk deÄŸer KDV dahil, ikinci deÄŸer +KDV (KDV hariÃ§) olarak yayÄ±nlanÄ±r.
+        // BÄ°M sÃ¶zleÅŸmesi iÃ§in "KDV dahil fiyatlar gÃ¶sterilsin" kapalÄ± olduÄŸundan ikinci deÄŸer kullanÄ±lÄ±r.
         const grossRaw = matches[0];
         const grossPrice = grossRaw ? Number(grossRaw.replace(",", ".")) : NaN;
-        // KDV kapalı görünümde PO'nun +KDV (net) değeri kullanılır. Bazı upstream HTML
-        // cevaplarında ikinci değer gizli/dinamik geldiği için tek değer görülürse brüt fiyatı
-        // %20 KDV'den arındırıp PO ekranındaki kuruş yukarı yuvarlama davranışıyla üretiriz.
+        // KDV kapalÄ± gÃ¶rÃ¼nÃ¼mde PO'nun +KDV (net) deÄŸeri kullanÄ±lÄ±r. BazÄ± upstream HTML
+        // cevaplarÄ±nda ikinci deÄŸer gizli/dinamik geldiÄŸi iÃ§in tek deÄŸer gÃ¶rÃ¼lÃ¼rse brÃ¼t fiyatÄ±
+        // %20 KDV'den arÄ±ndÄ±rÄ±p PO ekranÄ±ndaki kuruÅŸ yukarÄ± yuvarlama davranÄ±ÅŸÄ±yla Ã¼retiriz.
         const netFromGross = Number.isFinite(grossPrice) ? Math.ceil((grossPrice / 1.20) * 100 - 1e-9) / 100 : NaN;
         const raw = (!vatIncluded && matches.length > 1) ? matches[matches.length - 1] : grossRaw;
         const parsed = raw ? Number(raw.replace(",", ".")) : NaN;
         const price = !vatIncluded && matches.length === 1 ? netFromGross : parsed;
-        if (!Number.isFinite(price)) throw new Error(`${district} için ${fuel} fiyatı ayrıştırılamadı.`);
+        if (!Number.isFinite(price)) throw new Error(`${district} iÃ§in ${fuel} fiyatÄ± ayrÄ±ÅŸtÄ±rÄ±lamadÄ±.`);
         return price;
     }
-    throw new Error(`${district} ilçesi Petrol Ofisi fiyat tablosunda bulunamadı.`);
+    throw new Error(`${district} ilÃ§esi Petrol Ofisi fiyat tablosunda bulunamadÄ±.`);
 }
 
 function shellProductCode(data, fuel) {
@@ -186,7 +643,7 @@ function shellProductCode(data, fuel) {
         return wanted.some((name) => text.includes(trAscii(name)));
     });
     if (!product?.fepProductCode) {
-        throw new Error(`Shell ürün kodu bulunamadı: ${fuel}`);
+        throw new Error(`Shell Ã¼rÃ¼n kodu bulunamadÄ±: ${fuel}`);
     }
     return String(product.fepProductCode);
 }
@@ -196,11 +653,11 @@ function parseShellApiPrice(data, city, district, fuel) {
     const wantedCity = trAscii(city);
     const wantedDistrict = trAscii(district);
     const cityNode = groups.find((g) => trAscii(g?.cityName || "") === wantedCity);
-    if (!cityNode) throw new Error(`Shell resmi API yanıtında ${city} ili bulunamadı.`);
+    if (!cityNode) throw new Error(`Shell resmi API yanÄ±tÄ±nda ${city} ili bulunamadÄ±.`);
 
     const counties = Array.isArray(cityNode.counties) ? cityNode.counties : [];
     const county = counties.find((c) => trAscii(c?.countyName || "") === wantedDistrict);
-    if (!county) throw new Error(`Shell resmi API yanıtında ${city} / ${district} ilçesi bulunamadı.`);
+    if (!county) throw new Error(`Shell resmi API yanÄ±tÄ±nda ${city} / ${district} ilÃ§esi bulunamadÄ±.`);
 
     const productCode = shellProductCode(data, fuel);
     const prices = county.prices || {};
@@ -212,7 +669,7 @@ function parseShellApiPrice(data, city, district, fuel) {
     }
     const price = Number(rawPrice);
     if (!Number.isFinite(price)) {
-        throw new Error(`Shell resmi API yanıtında ${city} / ${district} / ${fuel} fiyatı bulunamadı.`);
+        throw new Error(`Shell resmi API yanÄ±tÄ±nda ${city} / ${district} / ${fuel} fiyatÄ± bulunamadÄ±.`);
     }
     return price;
 }
@@ -230,10 +687,10 @@ async function fetchShellPrice(city, district, fuel) {
         redirect: "follow"
     });
     const raw = await upstream.text();
-    if (!upstream.ok) throw new Error(`Shell resmi fiyat API'si HTTP ${upstream.status} döndürdü.`);
+    if (!upstream.ok) throw new Error(`Shell resmi fiyat API'si HTTP ${upstream.status} dÃ¶ndÃ¼rdÃ¼.`);
     let data;
     try { data = JSON.parse(raw); }
-    catch (_) { throw new Error("Shell resmi fiyat API'si JSON döndürmedi."); }
+    catch (_) { throw new Error("Shell resmi fiyat API'si JSON dÃ¶ndÃ¼rmedi."); }
     const price = parseShellApiPrice(data, city, district, fuel);
     return { price, sourceUrl: url };
 }
@@ -246,20 +703,20 @@ app.get("/api/fuel-check", async (req, res) => {
         const district = String(req.query.district || "").trim();
         const fuel = String(req.query.fuel || "Motorin").trim();
         const vatIncluded = String(req.query.vatIncluded ?? "true").toLowerCase() !== "false";
-        if (!city || !district) return res.status(400).json({ ok: false, error: "İl ve ilçe zorunludur." });
+        if (!city || !district) return res.status(400).json({ ok: false, error: "Ä°l ve ilÃ§e zorunludur." });
 
         let sourceUrl, price, providerName, sourceLabel;
         if (provider === "petrol-ofisi") {
             const slug = citySlug(city);
             sourceUrl = `https://www.petrolofisi.com.tr/akaryakit-fiyatlari/${slug}-akaryakit-fiyatlari`;
             providerName = "Petrol Ofisi";
-            sourceLabel = "Petrol Ofisi resmi fiyat sayfası";
+            sourceLabel = "Petrol Ofisi resmi fiyat sayfasÄ±";
         } else if (provider === "shell") {
             sourceUrl = "https://www.shell.com.tr/suruculer/shell-yakitlari/akaryakit-pompa-satis-fiyatlari.html";
             providerName = "Shell";
             sourceLabel = "Shell resmi pompa fiyat API'si";
         } else {
-            return res.status(400).json({ ok: false, error: "Bilinmeyen akaryakıt sağlayıcısı." });
+            return res.status(400).json({ ok: false, error: "Bilinmeyen akaryakÄ±t saÄŸlayÄ±cÄ±sÄ±." });
         }
 
         if (provider === "shell") {
@@ -276,19 +733,19 @@ app.get("/api/fuel-check", async (req, res) => {
                 redirect: "follow",
             });
             const html = await upstream.text();
-            if (!upstream.ok) throw new Error(`${providerName} fiyat sayfası HTTP ${upstream.status} döndürdü.`);
+            if (!upstream.ok) throw new Error(`${providerName} fiyat sayfasÄ± HTTP ${upstream.status} dÃ¶ndÃ¼rdÃ¼.`);
             price = parsePetrolOfisiPrice(html, district, fuel, city, vatIncluded);
         }
-        return res.json({ ok: true, provider: providerName, city, district, fuel, price, vatIncluded: provider === "petrol-ofisi" ? vatIncluded : null, priceMode: provider === "petrol-ofisi" ? (vatIncluded ? "KDV dahil" : "KDV hariç (+KDV)") : "Pompa fiyatı", sourceUrl, sourceLabel, checkedAt: new Date().toISOString() });
+        return res.json({ ok: true, provider: providerName, city, district, fuel, price, vatIncluded: provider === "petrol-ofisi" ? vatIncluded : null, priceMode: provider === "petrol-ofisi" ? (vatIncluded ? "KDV dahil" : "KDV hariÃ§ (+KDV)") : "Pompa fiyatÄ±", sourceUrl, sourceLabel, checkedAt: new Date().toISOString() });
     } catch (err) {
         console.error("[fuel-check]", err);
-        return res.status(502).json({ ok: false, error: err.message || "Fiyat kontrolü başarısız." });
+        return res.status(502).json({ ok: false, error: err.message || "Fiyat kontrolÃ¼ baÅŸarÄ±sÄ±z." });
     }
 });
 
 
 // ===============================
-// FUEL SERVICE — Render live backend
+// FUEL SERVICE â€” Render live backend
 // ===============================
 const fuelText = (html = "") => String(html)
   .replace(/&nbsp;|&#160;/gi, " ").replace(/&amp;/gi, "&")
@@ -297,8 +754,8 @@ const fuelText = (html = "") => String(html)
   .replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 
 const fuelAscii = (value = "") => String(value).trim().toLocaleUpperCase("tr-TR")
-  .replace(/İ/g, "I").replace(/Ş/g, "S").replace(/Ğ/g, "G")
-  .replace(/Ü/g, "U").replace(/Ö/g, "O").replace(/Ç/g, "C")
+  .replace(/Ä°/g, "I").replace(/Å/g, "S").replace(/Ä/g, "G")
+  .replace(/Ãœ/g, "U").replace(/Ã–/g, "O").replace(/Ã‡/g, "C")
   .normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 
 const fuelSlug = (value = "") => fuelAscii(value).toLowerCase()
@@ -328,7 +785,7 @@ function parsePetrolOfisi(html, city, district, fuel, vatIncluded) {
 
     if (Number.isFinite(price)) return price;
   }
-  throw new Error(`Petrol Ofisi fiyatı bulunamadı: ${city}/${district} ${fuel}`);
+  throw new Error(`Petrol Ofisi fiyatÄ± bulunamadÄ±: ${city}/${district} ${fuel}`);
 }
 
 function shellProductCode(data, fuel) {
@@ -343,25 +800,25 @@ function shellProductCode(data, fuel) {
         .includes(fuelAscii(name))
     )
   );
-  if (!product?.fepProductCode) throw new Error("Shell ürün kodu bulunamadı.");
+  if (!product?.fepProductCode) throw new Error("Shell Ã¼rÃ¼n kodu bulunamadÄ±.");
   return String(product.fepProductCode);
 }
 
 function parseShell(data, city, district, fuel) {
   const cityNode = (Array.isArray(data?.groups) ? data.groups : [])
     .find(item => fuelAscii(item?.cityName || "") === fuelAscii(city));
-  if (!cityNode) throw new Error(`Shell il bulunamadı: ${city}`);
+  if (!cityNode) throw new Error(`Shell il bulunamadÄ±: ${city}`);
 
   const county = (Array.isArray(cityNode.counties) ? cityNode.counties : [])
     .find(item => fuelAscii(item?.countyName || "") === fuelAscii(district));
-  if (!county) throw new Error(`Shell ilçe bulunamadı: ${city}/${district}`);
+  if (!county) throw new Error(`Shell ilÃ§e bulunamadÄ±: ${city}/${district}`);
 
   const code = shellProductCode(data, fuel);
   const prices = county.prices || {};
   const key = Object.keys(prices).find(k => String(k).trim() === code.trim());
   const price = Number(prices[code] ?? (key ? prices[key] : undefined));
 
-  if (!Number.isFinite(price)) throw new Error("Shell fiyatı bulunamadı.");
+  if (!Number.isFinite(price)) throw new Error("Shell fiyatÄ± bulunamadÄ±.");
   return price;
 }
 
@@ -375,7 +832,7 @@ async function fetchFuelPrice({ provider, city, district, fuel = "Motorin", vatI
     if (!upstream.ok) throw new Error(`Shell HTTP ${upstream.status}`);
     let data;
     try { data = JSON.parse(raw); }
-    catch { throw new Error("Shell servisi JSON döndürmedi."); }
+    catch { throw new Error("Shell servisi JSON dÃ¶ndÃ¼rmedi."); }
     return { price: parseShell(data, city, district, fuel), sourceUrl, providerName: "Shell" };
   }
 
@@ -399,13 +856,13 @@ async function fetchFuelPrice({ provider, city, district, fuel = "Motorin", vatI
 }
 
 const fuelTargets = [
-  { customer:"BİM", provider:"petrol-ofisi", city:"İstanbul", district:"SANCAKTEPE", fuel:"Motorin", vatIncluded:false },
-  { customer:"TEVERPAN", provider:"petrol-ofisi", city:"Tekirdağ", district:"ÇERKEZKÖY", fuel:"Motorin", vatIncluded:true },
-  { customer:"EFOR ÇAY", provider:"petrol-ofisi", city:"Tokat", district:"ERBAA", fuel:"Motorin", vatIncluded:true },
+  { customer:"BÄ°M", provider:"petrol-ofisi", city:"Ä°stanbul", district:"SANCAKTEPE", fuel:"Motorin", vatIncluded:false },
+  { customer:"TEVERPAN", provider:"petrol-ofisi", city:"TekirdaÄŸ", district:"Ã‡ERKEZKÃ–Y", fuel:"Motorin", vatIncluded:true },
+  { customer:"EFOR Ã‡AY", provider:"petrol-ofisi", city:"Tokat", district:"ERBAA", fuel:"Motorin", vatIncluded:true },
   { customer:"CORTEVA", provider:"petrol-ofisi", city:"Adana", district:"MERKEZ", fuel:"Motorin", vatIncluded:true },
   { customer:"CMC AGRO", provider:"petrol-ofisi", city:"Bursa", district:"KARACABEY", fuel:"Motorin", vatIncluded:true },
-  { customer:"ETİ", provider:"petrol-ofisi", city:"Eskişehir", district:"ODUNPAZARI", fuel:"Motorin", vatIncluded:true },
-  { customer:"KWS", provider:"petrol-ofisi", city:"Eskişehir", district:"MERKEZ", fuel:"Motorin", vatIncluded:true },
+  { customer:"ETÄ°", provider:"petrol-ofisi", city:"EskiÅŸehir", district:"ODUNPAZARI", fuel:"Motorin", vatIncluded:true },
+  { customer:"KWS", provider:"petrol-ofisi", city:"EskiÅŸehir", district:"MERKEZ", fuel:"Motorin", vatIncluded:true },
   { customer:"FASDAT", provider:"shell", city:"Afyon", district:"MERKEZ", fuel:"Motorin", vatIncluded:true }
 ];
 
@@ -452,6 +909,14 @@ app.get("/health", (req,res) => res.json({
 setTimeout(() => refreshFuelPrices("startup").catch(console.error), 10000);
 setInterval(() => refreshFuelPrices("scheduled").catch(console.error), 5 * 60 * 1000);
 
+
+/*
+ * Secure admin user management.
+ * Authentication + admin authorization
+ * router seviyesinde uygulanir.
+ */
+app.use("/api/data", dataApiRouter);
+app.use("/api/admin/users", adminUsersRouter);
 app.listen(PORT, () => {
-  console.log(`Backend çalışıyor: port ${PORT} | fuel-check aktif | 5 dk yakıt kontrolü aktif`);
+  console.log(`Backend Ã§alÄ±ÅŸÄ±yor: port ${PORT} | fuel-check aktif | 5 dk yakÄ±t kontrolÃ¼ aktif`);
 });

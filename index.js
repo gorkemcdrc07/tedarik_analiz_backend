@@ -917,6 +917,37 @@ setInterval(() => refreshFuelPrices("scheduled").catch(console.error), 5 * 60 * 
  */
 app.use("/api/data", dataApiRouter);
 app.use("/api/admin/users", adminUsersRouter);
+// CENTRAL_ERROR_HANDLER_V1
+app.use((err, req, res, next) => {
+  const isJsonParseError =
+    err?.type === "entity.parse.failed" ||
+    (
+      err instanceof SyntaxError &&
+      err?.status === 400 &&
+      Object.prototype.hasOwnProperty.call(err, "body")
+    );
+
+  if (isJsonParseError) {
+    return res.status(400).json({
+      error: "Gecersiz JSON govdesi."
+    });
+  }
+
+  console.error("[UNHANDLED_ERROR]", {
+    method: req.method,
+    path: req.originalUrl,
+    name: err?.name || "Error",
+    message: err?.message || "Unknown error"
+  });
+
+  if (res.headersSent) {
+    return next(err);
+  }
+
+  return res.status(500).json({
+    error: "Sunucu hatasi."
+  });
+});
 app.listen(PORT, () => {
   console.log(`Backend Ã§alÄ±ÅŸÄ±yor: port ${PORT} | fuel-check aktif | 5 dk yakÄ±t kontrolÃ¼ aktif`);
 });

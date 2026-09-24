@@ -1126,6 +1126,81 @@ router.post(
 
 // TESLIM_NOKTALARI_API_V1
 
+// SIPARIS_OLUSTUR_TESLIM_NOKTALARI_READ_V1
+// Siparis Olustur ekraninin eslestirme ve Excel islemleri icin
+// teslim noktalarini kendi ekran yetkisi kapsaminda okur.
+router.get(
+    "/siparis-olustur/teslim-noktalari",
+    requirePermission(
+        SIPARIS_OLUSTUR_SCREEN,
+        "Görüntüle"
+    ),
+    async (_req, res) => {
+        try {
+            const pageSize = 1000;
+            const maxRows = 100000;
+            const allRows = [];
+
+            for (
+                let offset = 0;
+                offset < maxRows;
+                offset += pageSize
+            ) {
+                const pagePath =
+                    "Teslim_Noktalari" +
+                    "?select=*" +
+                    "&order=id.asc" +
+                    `&offset=${offset}` +
+                    `&limit=${pageSize}`;
+
+                const page = await request(
+                    pagePath
+                );
+
+                const rows = Array.isArray(page)
+                    ? page
+                    : [];
+
+                allRows.push(...rows);
+
+                if (rows.length < pageSize) {
+                    break;
+                }
+
+                if (
+                    offset + pageSize >=
+                    maxRows
+                ) {
+                    throw new Error(
+                        "Siparis Olustur teslim noktalari guvenlik satir limiti asildi."
+                    );
+                }
+            }
+
+            res.set(
+                "Cache-Control",
+                "no-store"
+            );
+
+            return res.json({
+                ok: true,
+                data: allRows,
+                count: allRows.length,
+            });
+        } catch (error) {
+            console.error(
+                "Siparis Olustur teslim noktalari read error:",
+                error.message
+            );
+
+            return res.status(500).json({
+                ok: false,
+                error:
+                    "Teslim noktaları alınamadı.",
+            });
+        }
+    }
+);
 // GET /api/data/teslim-noktalari
 // Teslim noktalarini guvenli pagination ile listeler.
 router.get(

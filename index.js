@@ -81,6 +81,7 @@ const {
 
 const {
     tmsFetch,
+    tmsOrderFetch,
 } = require("./auth/reelTms");
 
 const {
@@ -465,17 +466,41 @@ app.post(
     requireAuth,
     async (req, res) => {
         try {
-            const upstream = await tmsFetch(
-                req.auth.userKey,
-                "/api/tmsorders/add",
+            const hasOrderServiceAccount =
+                Boolean(
+                    String(
+                        process.env.TMS_ORDER_USERNAME || ""
+                    ).trim()
+                ) &&
+                Boolean(
+                    String(
+                        process.env.TMS_ORDER_PASSWORD || ""
+                    )
+                );
+
+            const upstream =
+                hasOrderServiceAccount
+                    ? await tmsOrderFetch(
+                        "/api/tmsorders/add",
                 {
                     method: "POST",
                     headers: {
                         "Content-Type": "application/json",
                     },
                     body: JSON.stringify(req.body ?? {}),
-                }
-            );
+                        }
+                    )
+                    : await tmsFetch(
+                        req.auth.userKey,
+                        "/api/tmsorders/add",
+                        {
+                            method: "POST",
+                            headers: {
+                                "Content-Type": "application/json",
+                            },
+                            body: JSON.stringify(req.body ?? {}),
+                        }
+                    );
 
             const text = await upstream.text();
 

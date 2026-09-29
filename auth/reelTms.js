@@ -293,8 +293,203 @@ async function tmsFetch(
 
     return response;
 }
+
+
+/*
+ * TMS ORDER SERVICE ACCOUNT
+ *
+ * Siparis olusturma islemleri icin kullanilan
+ * server-side TMS hesabi.
+ *
+ * Credential degerleri sadece environment
+ * variable uzerinden okunur.
+ */
+
+let orderTokenCache = null;
+
+function getOrderCredentials() {
+    const userName = String(
+        process.env.TMS_ORDER_USERNAME || ""
+    ).trim();
+
+    const password = String(
+        process.env.TMS_ORDER_PASSWORD || ""
+    );
+
+    if (!userName || !password) {
+        const err = new Error(
+            "TMS siparis servis hesabi yapilandirilmamis."
+        );
+
+        err.status = 503;
+        throw err;
+    }
+
+    return {
+        userName,
+        password,
+    };
+}
+
+function invalidateOrderTmsToken() {
+    orderTokenCache = null;
+}
+
+async function getOrderTmsToken({
+    forceRefresh = false,
+} = {}) {
+    if (
+        !forceRefresh &&
+        orderTokenCache?.token &&
+        orderTokenCache?.expiresAt &&
+        Date.now() <
+            orderTokenCache.expiresAt -
+                TOKEN_SKEW_MS
+    ) {
+        return orderTokenCache.token;
+    }
+
+    const credentials =
+        getOrderCredentials();
+
+    const response = await fetch(
+        "https://tms.odaklojistik.com.tr/api/auth/login",
+        {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                Accept: "application/json",
+            },
+            body: JSON.stringify(
+                credentials
+            ),
+        }
+    );
+
+    const text = await response.text();
+
+    if (!response.ok) {
+        const err = new Error(
+            "TMS siparis servis hesabi login basarisiz (" +
+            response.status +
+            ")."
+        );
+
+        err.status = 502;
+        throw err;
+    }
+
+    let data;
+
+    try {
+        data = JSON.parse(text);
+    } catch {
+        const err = new Error(
+            "TMS siparis login cevabi gecersiz."
+        );
+
+        err.status = 502;
+        throw err;
+    }
+
+    const token =
+        data?.token ||
+        data?.accessToken ||
+        data?.access_token ||
+        data?.Token ||
+        data?.AccessToken;
+
+    if (!token) {
+        const err = new Error(
+            "TMS siparis login cevabinda token bulunamadi."
+        );
+
+        err.status = 502;
+        throw err;
+    }
+
+    let expiresAt =
+        Date.now() + 30 * 60 * 1000;
+
+    try {
+        const parts =
+            String(token).split(".");
+
+        if (parts.length === 3) {
+            const payload = JSON.parse(
+                Buffer.from(
+                    parts[1],
+                    "base64url"
+                ).toString("utf8")
+            );
+
+            if (
+                Number.isFinite(
+                    Number(payload?.exp)
+                )
+            ) {
+                expiresAt =
+                    Number(payload.exp) *
+                    1000;
+            }
+        }
+    } catch {
+        // JWT okunamazsa varsayilan
+        // cache suresi kullanilir.
+    }
+
+    orderTokenCache = {
+        token,
+        expiresAt,
+    };
+
+    return token;
+}
+
+async function tmsOrderFetch(
+    path,
+    init = {}
+) {
+    const execute = async (
+        forceRefresh = false
+    ) => {
+        const token =
+            await getOrderTmsToken({
+                forceRefresh,
+            });
+
+        return fetch(
+            "https://tms.odaklojistik.com.tr" +
+                path,
+            {
+                ...init,
+                headers: {
+                    ...(init.headers || {}),
+                    Authorization:
+                        "Bearer " + token,
+                },
+            }
+        );
+    };
+
+    let response =
+        await execute(false);
+
+    if (response.status === 401) {
+        invalidateOrderTmsToken();
+
+        response =
+            await execute(true);
+    }
+
+    return response;
+}
+
 module.exports = {
     getTmsToken,
     invalidateTmsToken,
     tmsFetch,
+    getOrderTmsToken,
+    invalidateOrderTmsToken,
+    tmsOrderFetch,
 };

@@ -14,3 +14,5 @@ yarn-error.log*
 *-backup.jsx
 *-backup.ts
 *-backup.tsx
+auth/*.before-*.js
+*.before-*.js

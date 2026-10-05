@@ -8,6 +8,7 @@ const { createClient } = require("@supabase/supabase-js");
 const { createSession } = require("./auth/session");
 const { requireAuth } = require("./auth/middleware");
 const { getTmsToken, tmsFetch } = require("./auth/reelTms");
+const fuelDataApi = require("./auth/fuelDataApi");
 // .env dosyasını process.cwd() yerine doğrudan server klasöründen yükle.
 // Böylece `npm --prefix server start` ve farklı çalışma dizinlerinde aynı davranır.
 const envPath = path.resolve(__dirname, ".env");
@@ -40,6 +41,8 @@ app.use(
 
 app.use(cookieParser());
 app.use(express.json());
+
+app.use("/api/yakit-hesaplama", fuelDataApi);
 
 const PORT = process.env.PORT || 5000;
 console.log(`🔐 Supabase env: URL=${Boolean(process.env.SUPABASE_URL)} KEY=${Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY)}`);

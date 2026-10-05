@@ -193,26 +193,45 @@ app.post("/api/reel-api/tmsdespatchincomeexpenses/addincome", async (req, res) =
 // ===============================
 // 3) TMS PROD / ADD ORDER  ✅ YENİ
 // ===============================
-app.post("/api/reel-api/tmsorders/add", async (req, res) => {
-    try {
-        const upstream = await fetch(
-            "https://tms.odaklojistik.com.tr/api/tmsorders/add",
-            {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    Authorization: req.headers.authorization || "",
-                },
-                body: JSON.stringify(req.body),
-            }
-        );
+app.post(
+    "/api/reel-api/tmsorders/add",
+    requireAuth,
+    async (req, res) => {
+        try {
+            const token = await getTmsToken(
+                req.auth.userKey,
+                "prod"
+            );
 
-        const text = await upstream.text();
-        res.status(upstream.status).send(text);
-    } catch (err) {
-        res.status(500).json({ error: "Order proxy error", detail: err.message });
+            const upstream = await fetch(
+                "https://tms.odaklojistik.com.tr/api/tmsorders/add",
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        Authorization: `Bearer ${token}`,
+                    },
+                    body: JSON.stringify(req.body),
+                }
+            );
+
+            const text = await upstream.text();
+
+            return res
+                .status(upstream.status)
+                .send(text);
+        } catch (err) {
+            console.error(
+                "Secure TMS order proxy error:",
+                err?.message || err
+            );
+
+            return res.status(502).json({
+                error: "TMS siparis gonderilemedi.",
+            });
+        }
     }
-});
+);
 
 // ===============================
 // 4) TMS AUTH LOGIN (PROD)

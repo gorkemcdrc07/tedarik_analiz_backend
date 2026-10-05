@@ -501,51 +501,283 @@ async function fetchShellPrice(city, district, fuel) {
     return { price, sourceUrl: url };
 }
 
+
+async function fetchOpetPrice(city, district, fuel) {
+    const baseUrl = "https://api.opet.com.tr/api";
+
+    const headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json",
+        "Accept-Language": "tr-TR",
+        "Channel": "Web",
+        "Origin": "https://www.opet.com.tr",
+        "Referer": "https://www.opet.com.tr/"
+    };
+
+    const normalizeTr = (value) => String(value || "")
+        .trim()
+        .toLocaleUpperCase("tr-TR")
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "");
+
+    const provinceResponse = await fetch(
+        `${baseUrl}/fuelprices/provinces`,
+        { headers }
+    );
+
+    if (!provinceResponse.ok) {
+        throw new Error(
+            `OPET province API HTTP ${provinceResponse.status}`
+        );
+    }
+
+    const provinces = await provinceResponse.json();
+
+    const cityKey = normalizeTr(city);
+
+    let province = provinces.find((item) =>
+        normalizeTr(item.name) === cityKey
+    );
+
+    if (!province && cityKey === "ISTANBUL") {
+        province = provinces.find((item) =>
+            normalizeTr(item.name) === "ISTANBUL ANADOLU"
+        );
+    }
+
+    if (!province) {
+        throw new Error(`OPET il bulunamadi: ${city}`);
+    }
+
+    const priceResponse = await fetch(
+        `${baseUrl}/fuelprices/prices?ProvinceCode=${encodeURIComponent(
+            province.code
+        )}&IncludeAllProducts=true`,
+        { headers }
+    );
+
+    if (!priceResponse.ok) {
+        throw new Error(
+            `OPET price API HTTP ${priceResponse.status}`
+        );
+    }
+
+    const rows = await priceResponse.json();
+
+    const districtKey = normalizeTr(district);
+
+    const districtRow = rows.find((item) =>
+        normalizeTr(item.districtName) === districtKey
+    );
+
+    if (!districtRow) {
+        throw new Error(`OPET ilce bulunamadi: ${district}`);
+    }
+
+    const fuelKey = normalizeTr(fuel);
+
+    let product;
+
+    if (
+        fuelKey.includes("MOTORIN") ||
+        fuelKey.includes("DIZEL") ||
+        fuelKey.includes("DIESEL")
+    ) {
+        product =
+            districtRow.prices?.find(
+                (item) => item.productCode === "A121"
+            ) ||
+            districtRow.prices?.find(
+                (item) => item.productCode === "A128"
+            );
+    } else {
+        product = districtRow.prices?.find((item) =>
+            normalizeTr(item.productName).includes(fuelKey)
+        );
+    }
+
+    const price = Number(product?.amount);
+
+    if (!Number.isFinite(price) || price <= 0) {
+        throw new Error(
+            `OPET ${district} ${fuel} fiyati bulunamadi.`
+        );
+    }
+
+    let lastUpdate = null;
+
+    try {
+        const updateResponse = await fetch(
+            `${baseUrl}/fuelprices/lastupdate`,
+            { headers }
+        );
+
+        if (updateResponse.ok) {
+            const updateData = await updateResponse.json();
+            lastUpdate = updateData?.lastUpdateDate || null;
+        }
+    } catch (_) {
+        // Fiyat bulunduysa son guncelleme bilgisi zorunlu degil.
+    }
+
+    return {
+        price,
+        productName: product?.productName || "Motorin",
+        productCode: product?.productCode || null,
+        provinceName: province.name,
+        districtName: districtRow.districtName,
+        lastUpdate,
+        sourceUrl: "https://www.opet.com.tr/akaryakit-fiyatlari"
+    };
+}
+
 app.get("/api/fuel-check", async (req, res) => {
     res.set("Cache-Control", "no-store");
+
     try {
         const provider = String(req.query.provider || "");
         const city = String(req.query.city || "").trim();
         const district = String(req.query.district || "").trim();
         const fuel = String(req.query.fuel || "Motorin").trim();
-        const vatIncluded = String(req.query.vatIncluded ?? "true").toLowerCase() !== "false";
-        if (!city || !district) return res.status(400).json({ ok: false, error: "İl ve ilçe zorunludur." });
+        const vatIncluded =
+            String(req.query.vatIncluded ?? "true").toLowerCase() !== "false";
 
-        let sourceUrl, price, providerName, sourceLabel;
+        if (!city || !district) {
+            return res.status(400).json({
+                ok: false,
+                error: "\u0130l ve il\u00e7e zorunludur."
+            });
+        }
+
+        let sourceUrl;
+        let price;
+        let providerName;
+        let sourceLabel;
+        let providerMeta = null;
+
         if (provider === "petrol-ofisi") {
             const slug = citySlug(city);
-            sourceUrl = `https://www.petrolofisi.com.tr/akaryakit-fiyatlari/${slug}-akaryakit-fiyatlari`;
+
+            sourceUrl =
+                `https://www.petrolofisi.com.tr/akaryakit-fiyatlari/${slug}-akaryakit-fiyatlari`;
+
             providerName = "Petrol Ofisi";
-            sourceLabel = "Petrol Ofisi resmi fiyat sayfası";
+            sourceLabel = "Petrol Ofisi resmi fiyat sayfas\u0131";
+
         } else if (provider === "shell") {
-            sourceUrl = "https://www.shell.com.tr/suruculer/shell-yakitlari/akaryakit-pompa-satis-fiyatlari.html";
+            sourceUrl =
+                "https://www.shell.com.tr/suruculer/shell-yakitlari/akaryakit-pompa-satis-fiyatlari.html";
+
             providerName = "Shell";
             sourceLabel = "Shell resmi pompa fiyat API'si";
+
+        } else if (provider === "opet") {
+            sourceUrl =
+                "https://www.opet.com.tr/akaryakit-fiyatlari";
+
+            providerName = "OPET";
+            sourceLabel = "OPET resmi akaryak\u0131t fiyat API'si";
+
         } else {
-            return res.status(400).json({ ok: false, error: "Bilinmeyen akaryakıt sağlayıcısı." });
+            return res.status(400).json({
+                ok: false,
+                error: "Bilinmeyen akaryak\u0131t sa\u011flay\u0131c\u0131s\u0131."
+            });
         }
 
         if (provider === "shell") {
-            const shellResult = await fetchShellPrice(city, district, fuel);
+            const shellResult =
+                await fetchShellPrice(city, district, fuel);
+
             price = shellResult.price;
             sourceUrl = shellResult.sourceUrl;
+
+        } else if (provider === "opet") {
+            const opetResult =
+                await fetchOpetPrice(city, district, fuel);
+
+            price = opetResult.price;
+            sourceUrl = opetResult.sourceUrl;
+            providerMeta = opetResult;
+
         } else {
             const upstream = await fetch(sourceUrl, {
                 headers: {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.7",
+                    "User-Agent":
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36",
+                    "Accept":
+                        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language":
+                        "tr-TR,tr;q=0.9,en;q=0.7"
                 },
-                redirect: "follow",
+                redirect: "follow"
             });
+
             const html = await upstream.text();
-            if (!upstream.ok) throw new Error(`${providerName} fiyat sayfası HTTP ${upstream.status} döndürdü.`);
-            price = parsePetrolOfisiPrice(html, district, fuel, city, vatIncluded);
+
+            if (!upstream.ok) {
+                throw new Error(
+                    `${providerName} fiyat sayfas\u0131 HTTP ${upstream.status} d\u00f6nd\u00fcrd\u00fc.`
+                );
+            }
+
+            price = parsePetrolOfisiPrice(
+                html,
+                district,
+                fuel,
+                city,
+                vatIncluded
+            );
         }
-        return res.json({ ok: true, provider: providerName, city, district, fuel, price, vatIncluded: provider === "petrol-ofisi" ? vatIncluded : null, priceMode: provider === "petrol-ofisi" ? (vatIncluded ? "KDV dahil" : "KDV hariç (+KDV)") : "Pompa fiyatı", sourceUrl, sourceLabel, checkedAt: new Date().toISOString() });
+
+        return res.json({
+            ok: true,
+            provider: providerName,
+            city,
+            district,
+            fuel,
+            price,
+
+            vatIncluded:
+                provider === "petrol-ofisi"
+                    ? vatIncluded
+                    : null,
+
+            priceMode:
+                provider === "petrol-ofisi"
+                    ? (
+                        vatIncluded
+                            ? "KDV dahil"
+                            : "KDV hari\u00e7 (+KDV)"
+                    )
+                    : provider === "opet"
+                        ? "Tavsiye edilen pompa fiyat\u0131"
+                        : "Pompa fiyat\u0131",
+
+            sourceUrl,
+            sourceLabel,
+            checkedAt: new Date().toISOString(),
+
+            ...(provider === "opet" && providerMeta
+                ? {
+                    productName: providerMeta.productName,
+                    productCode: providerMeta.productCode,
+                    sourceProvince: providerMeta.provinceName,
+                    sourceDistrict: providerMeta.districtName,
+                    sourceLastUpdate: providerMeta.lastUpdate
+                }
+                : {})
+        });
+
     } catch (err) {
         console.error("[fuel-check]", err);
-        return res.status(502).json({ ok: false, error: err.message || "Fiyat kontrolü başarısız." });
+
+        return res.status(502).json({
+            ok: false,
+            error:
+                err.message ||
+                "Fiyat kontrol\u00fc ba\u015far\u0131s\u0131z."
+        });
     }
 });
 

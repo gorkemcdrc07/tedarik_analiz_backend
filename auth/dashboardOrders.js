@@ -125,12 +125,94 @@ router.get(
                     }
                 );
 
+            const safeRows =
+                Array.isArray(rows)
+                    ? rows
+                    : [];
+
+            const userKeys = [
+                ...new Set(
+                    safeRows
+                        .map((row) =>
+                            String(
+                                row?.user_key || ""
+                            ).trim()
+                        )
+                        .filter(Boolean)
+                ),
+            ];
+
+            const usersById = new Map();
+
+            if (userKeys.length) {
+                const encodedIds =
+                    userKeys
+                        .map(
+                            (id) =>
+                                `"${String(id)
+                                    .replace(/\\/g, "\\\\")
+                                    .replace(/"/g, '\\"')}"`
+                        )
+                        .join(",");
+
+                const users =
+                    await request(
+                        `Login?id=in.(${encodeURIComponent(encodedIds)})` +
+                        `&select=id,kullanici_adi,kullanici`
+                    );
+
+                for (
+                    const user of
+                    Array.isArray(users)
+                        ? users
+                        : []
+                ) {
+                    usersById.set(
+                        String(user.id),
+                        {
+                            kullanici:
+                                String(
+                                    user.kullanici ||
+                                    user.kullanici_adi ||
+                                    ""
+                                ).trim(),
+                            kullaniciAdi:
+                                String(
+                                    user.kullanici_adi ||
+                                    ""
+                                ).trim(),
+                        }
+                    );
+                }
+            }
+
+            const data =
+                safeRows.map((row) => {
+                    const user =
+                        usersById.get(
+                            String(row.user_key)
+                        );
+
+                    return {
+                        id: row.id,
+                        proje_adi:
+                            row.proje_adi,
+                        siparis_adedi:
+                            row.siparis_adedi,
+                        created_at:
+                            row.created_at,
+                        kullanici:
+                            user?.kullanici ||
+                            "Bilinmeyen Kullanici",
+                        kullanici_adi:
+                            user?.kullaniciAdi ||
+                            "",
+                    };
+                });
+
             return res.json({
                 ok: true,
-                data:
-                    Array.isArray(rows)
-                        ? rows
-                        : [],
+                data,
             });
         } catch (error) {
             console.error(

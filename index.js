@@ -3,14 +3,42 @@ const fetch = require("node-fetch");
 const cors = require("cors");
 const path = require("path");
 const bcrypt = require("bcryptjs");
+const cookieParser = require("cookie-parser");
 const { createClient } = require("@supabase/supabase-js");
+const { createSession } = require("./auth/session");
+const { requireAuth } = require("./auth/middleware");
+const { getTmsToken } = require("./auth/reelTms");
 // .env dosyasını process.cwd() yerine doğrudan server klasöründen yükle.
 // Böylece `npm --prefix server start` ve farklı çalışma dizinlerinde aynı davranır.
 const envPath = path.resolve(__dirname, ".env");
 require("dotenv").config({ path: envPath, override: true });
 
 const app = express();
-app.use(cors());
+
+app.set("trust proxy", 1);
+
+const allowedOrigins = new Set([
+    "https://tedarik-analiz.vercel.app",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]);
+
+app.use(
+    cors({
+        origin(origin, callback) {
+            if (!origin || allowedOrigins.has(origin)) {
+                return callback(null, true);
+            }
+
+            return callback(new Error("CORS origin not allowed."));
+        },
+        credentials: true,
+        methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allowedHeaders: ["Content-Type", "Authorization"],
+    })
+);
+
+app.use(cookieParser());
 app.use(express.json());
 
 const PORT = process.env.PORT || 5000;
@@ -58,7 +86,7 @@ app.post("/api/auth/login", async (req, res) => {
         const { data: user, error } = await supabase
             .from("Login")
             .select(
-                'id,kullanici_adi,kullanici,"Reel_kullanici","Reel_sifre",rol,"allowedScreens","allowedButtons",password_hash'
+                'id,kullanici_adi,kullanici,"Reel_kullanici",rol,"allowedScreens","allowedButtons",password_hash'
             )
             .eq("kullanici_adi", username)
             .maybeSingle();
@@ -92,6 +120,12 @@ app.post("/api/auth/login", async (req, res) => {
         }
 
         const { password_hash, ...safeUser } = user;
+
+        await createSession({
+            req,
+            res,
+            userKey: user.id,
+        });
 
         return res.json({
             ok: true,
@@ -183,20 +217,31 @@ app.post("/api/reel-api/tmsorders/add", async (req, res) => {
 // ===============================
 // 4) TMS AUTH LOGIN (PROD)
 // ===============================
-app.post("/reel-auth/api/auth/login", async (req, res) => {
-    try {
-        const upstream = await fetch("https://tms.odaklojistik.com.tr/api/auth/login", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(req.body ?? {}),
-        });
+app.post(
+    "/reel-auth/api/auth/login",
+    requireAuth,
+    async (req, res) => {
+        try {
+            const token = await getTmsToken(
+                req.auth.userKey,
+                "prod"
+            );
 
-        const text = await upstream.text();
-        res.status(upstream.status).send(text);
-    } catch (err) {
-        res.status(500).json({ error: "Auth proxy error", detail: err.message });
+            return res.json({
+                token,
+            });
+        } catch (err) {
+            console.error(
+                "Secure TMS token error:",
+                err?.message || err
+            );
+
+            return res.status(502).json({
+                error: "TMS token alinamadi.",
+            });
+        }
     }
-});
+);
 
 
 // ===============================

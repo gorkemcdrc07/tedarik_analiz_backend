@@ -7,7 +7,7 @@ const cookieParser = require("cookie-parser");
 const { createClient } = require("@supabase/supabase-js");
 const { createSession } = require("./auth/session");
 const { requireAuth } = require("./auth/middleware");
-const { getTmsToken } = require("./auth/reelTms");
+const { getTmsToken, tmsFetch } = require("./auth/reelTms");
 // .env dosyasını process.cwd() yerine doğrudan server klasöründen yükle.
 // Böylece `npm --prefix server start` ve farklı çalışma dizinlerinde aynı davranır.
 const envPath = path.resolve(__dirname, ".env");
@@ -300,20 +300,18 @@ app.post(
     requireAuth,
     async (req, res) => {
         try {
-            const token = await getTmsToken(
+            const upstream = await tmsFetch(
                 req.auth.userKey,
-                "prod"
-            );
-
-            const upstream = await fetch(
-                "https://tms.odaklojistik.com.tr/api/tmsorders/add",
+                "/api/tmsorders/add",
                 {
                     method: "POST",
                     headers: {
                         "Content-Type": "application/json",
-                        Authorization: `Bearer ${token}`,
                     },
                     body: JSON.stringify(req.body),
+                },
+                {
+                    environment: "prod",
                 }
             );
 

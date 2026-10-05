@@ -143,6 +143,108 @@ app.post("/api/auth/login", async (req, res) => {
 });
 
 // ===============================
+// APPLICATION PASSWORD RESET
+// TEMPORARY: Login ekranindan sifre yenileme
+// ===============================
+app.post("/api/auth/reset-password", async (req, res) => {
+    try {
+        if (!supabase) {
+            return res.status(503).json({
+                ok: false,
+                error: "Kimlik dogrulama servisi kullanilamiyor."
+            });
+        }
+
+        const username = String(
+            req.body?.username || ""
+        ).trim();
+
+        const newPassword = String(
+            req.body?.newPassword || ""
+        );
+
+        if (!username || !newPassword) {
+            return res.status(400).json({
+                ok: false,
+                error: "Kullanici adi ve yeni sifre zorunludur."
+            });
+        }
+
+        if (newPassword.length < 8) {
+            return res.status(400).json({
+                ok: false,
+                error: "Yeni sifre en az 8 karakter olmalidir."
+            });
+        }
+
+        const { data: user, error: findError } = await supabase
+            .from("Login")
+            .select("id,kullanici_adi")
+            .eq("kullanici_adi", username)
+            .maybeSingle();
+
+        if (findError) {
+            console.error(
+                "Password reset user lookup error:",
+                findError.message
+            );
+
+            return res.status(500).json({
+                ok: false,
+                error: "Sifre degistirilemedi."
+            });
+        }
+
+        if (!user) {
+            return res.status(404).json({
+                ok: false,
+                error: "Kullanici bulunamadi."
+            });
+        }
+
+        const passwordHash = await bcrypt.hash(
+            newPassword,
+            12
+        );
+
+        const { error: updateError } = await supabase
+            .from("Login")
+            .update({
+                password_hash: passwordHash
+            })
+            .eq("id", user.id);
+
+        if (updateError) {
+            console.error(
+                "Password reset update error:",
+                updateError.message
+            );
+
+            return res.status(500).json({
+                ok: false,
+                error: "Sifre degistirilemedi."
+            });
+        }
+
+        return res.json({
+            ok: true,
+            message: "Sifre basariyla degistirildi."
+        });
+
+    } catch (err) {
+        console.error(
+            "Password reset error:",
+            err?.message || err
+        );
+
+        return res.status(500).json({
+            ok: false,
+            error: "Sifre degistirme islemi tamamlanamadi."
+        });
+    }
+});
+
+// ===============================
 // 1) TMS PROD / ADD EXPENSE
 // ===============================
 app.post("/api/reel-api/tmsdespatchincomeexpenses/addexpense", async (req, res) => {

@@ -2,6 +2,8 @@ const express = require("express");
 const fetch = require("node-fetch");
 const cors = require("cors");
 const path = require("path");
+const bcrypt = require("bcryptjs");
+const { createClient } = require("@supabase/supabase-js");
 // .env dosyasını process.cwd() yerine doğrudan server klasöründen yükle.
 // Böylece `npm --prefix server start` ve farklı çalışma dizinlerinde aynı davranır.
 const envPath = path.resolve(__dirname, ".env");
@@ -13,6 +15,98 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 5000;
 console.log(`🔐 Supabase env: URL=${Boolean(process.env.SUPABASE_URL)} KEY=${Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY)}`);
+
+// ===============================
+// UYGULAMA LOGIN / SUPABASE
+// ===============================
+
+const supabase =
+    process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY
+        ? createClient(
+            process.env.SUPABASE_URL,
+            process.env.SUPABASE_SERVICE_ROLE_KEY,
+            {
+                auth: {
+                    persistSession: false,
+                    autoRefreshToken: false
+                }
+            }
+        )
+        : null;
+
+app.post("/api/auth/login", async (req, res) => {
+    try {
+        if (!supabase) {
+            console.error("Supabase environment variables missing.");
+
+            return res.status(503).json({
+                ok: false,
+                error: "Kimlik do?rulama servisi kullan?lam?yor."
+            });
+        }
+
+        const username = String(req.body?.username || "").trim();
+        const password = String(req.body?.password || "");
+
+        if (!username || !password) {
+            return res.status(400).json({
+                ok: false,
+                error: "Kullan?c? ad? ve ?ifre zorunludur."
+            });
+        }
+
+        const { data: user, error } = await supabase
+            .from("Login")
+            .select(
+                'id,kullanici_adi,kullanici,"Reel_kullanici","Reel_sifre",rol,"allowedScreens","allowedButtons",password_hash'
+            )
+            .eq("kullanici_adi", username)
+            .maybeSingle();
+
+        if (error) {
+            console.error("Supabase login error:", error.message);
+
+            return res.status(500).json({
+                ok: false,
+                error: "Giri? s?ras?nda veritaban? hatas? olu?tu."
+            });
+        }
+
+        if (!user || !user.password_hash) {
+            return res.status(401).json({
+                ok: false,
+                error: "Kullan?c? ad? veya ?ifre hatal?."
+            });
+        }
+
+        const passwordMatches = await bcrypt.compare(
+            password,
+            user.password_hash
+        );
+
+        if (!passwordMatches) {
+            return res.status(401).json({
+                ok: false,
+                error: "Kullan?c? ad? veya ?ifre hatal?."
+            });
+        }
+
+        const { password_hash, ...safeUser } = user;
+
+        return res.json({
+            ok: true,
+            user: safeUser
+        });
+
+    } catch (err) {
+        console.error("Application login error:", err);
+
+        return res.status(500).json({
+            ok: false,
+            error: "Giri? i?lemi tamamlanamad?."
+        });
+    }
+});
 
 // ===============================
 // 1) TMS PROD / ADD EXPENSE

@@ -510,15 +510,23 @@ async function fetchOpetPriceFromDoviz(city, district, fuel) {
         .normalize("NFD")
         .replace(/[\u0300-\u036f]/g, "");
 
+    const slugifyTr = (value) => String(value || "")
+        .trim()
+        .toLocaleLowerCase("tr-TR")
+        .replace(/\u0131/g, "i")
+        .replace(/\u011f/g, "g")
+        .replace(/\u00fc/g, "u")
+        .replace(/\u015f/g, "s")
+        .replace(/\u00f6/g, "o")
+        .replace(/\u00e7/g, "c")
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "");
+
     const cityKey = normalizeTr(city);
     const districtKey = normalizeTr(district);
     const fuelKey = normalizeTr(fuel);
-
-    if (cityKey !== "ISTANBUL" || districtKey !== "SANCAKTEPE") {
-        throw new Error(
-            `OPET Doviz fallback bu konum icin desteklenmiyor: ${city}/${district}`
-        );
-    }
 
     if (
         !fuelKey.includes("MOTORIN") &&
@@ -530,22 +538,72 @@ async function fetchOpetPriceFromDoviz(city, district, fuel) {
         );
     }
 
-    const sourceUrl =
-        "https://www.doviz.com/akaryakit-fiyatlari/istanbul-anadolu/sancaktepe/opet";
+    if (!cityKey || !districtKey) {
+        throw new Error(
+            "OPET Doviz fallback icin il ve ilce zorunludur."
+        );
+    }
 
-    const response = await fetch(sourceUrl, {
-        headers: {
-            "User-Agent":
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36",
-            "Accept":
-                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "tr-TR,tr;q=0.9"
-        }
-    });
+    let citySlugValue = slugifyTr(city);
+    const districtSlugValue = slugifyTr(district);
+
+    /*
+     * Doviz.com Istanbul'u Anadolu / Avrupa olarak ayiriyor.
+     * Anadolu yakasi ilceleri burada kontrollu sekilde esleniyor.
+     */
+    if (cityKey === "ISTANBUL") {
+        const anatolianDistricts = new Set([
+            "ADALAR",
+            "ATASEHIR",
+            "BEYKOZ",
+            "CEKMEKOY",
+            "KADIKOY",
+            "KARTAL",
+            "MALTEPE",
+            "PENDIK",
+            "SANCAKTEPE",
+            "SILE",
+            "SULTANBEYLI",
+            "TUZLA",
+            "UMRANIYE",
+            "USKUDAR"
+        ]);
+
+        citySlugValue = anatolianDistricts.has(districtKey)
+            ? "istanbul-anadolu"
+            : "istanbul-avrupa";
+    }
+
+    const sourceUrl =
+        `https://www.doviz.com/akaryakit-fiyatlari/${citySlugValue}/${districtSlugValue}/opet`;
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(
+        () => controller.abort(),
+        8000
+    );
+
+    let response;
+
+    try {
+        response = await fetch(sourceUrl, {
+            signal: controller.signal,
+            headers: {
+                "User-Agent":
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36",
+                "Accept":
+                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language":
+                    "tr-TR,tr;q=0.9"
+            }
+        });
+    } finally {
+        clearTimeout(timeoutId);
+    }
 
     if (!response.ok) {
         throw new Error(
-            `Doviz OPET fallback HTTP ${response.status}`
+            `Doviz OPET fallback HTTP ${response.status}: ${city}/${district}`
         );
     }
 
@@ -557,7 +615,7 @@ async function fetchOpetPriceFromDoviz(city, district, fuel) {
 
     if (!descriptionMatch) {
         throw new Error(
-            "Doviz OPET fallback description bulunamadi."
+            `Doviz OPET fallback description bulunamadi: ${city}/${district}`
         );
     }
 
@@ -569,7 +627,7 @@ async function fetchOpetPriceFromDoviz(city, district, fuel) {
 
     if (!priceMatch) {
         throw new Error(
-            "Doviz OPET fallback motorin fiyati bulunamadi."
+            `Doviz OPET fallback motorin fiyati bulunamadi: ${city}/${district}`
         );
     }
 
@@ -579,7 +637,7 @@ async function fetchOpetPriceFromDoviz(city, district, fuel) {
 
     if (!Number.isFinite(price) || price <= 0) {
         throw new Error(
-            "Doviz OPET fallback gecersiz motorin fiyati."
+            `Doviz OPET fallback gecersiz motorin fiyati: ${city}/${district}`
         );
     }
 
@@ -591,11 +649,15 @@ async function fetchOpetPriceFromDoviz(city, district, fuel) {
         price,
         productName: "Motorin",
         productCode: null,
-        provinceName: "Istanbul Anadolu",
-        districtName: "Sancaktepe",
-        lastUpdate: dateMatch ? dateMatch[1] : null,
+        provinceName: city,
+        districtName: district,
+        lastUpdate:
+            dateMatch
+                ? dateMatch[1]
+                : null,
         sourceUrl,
-        sourceLabel: "Doviz.com OPET Sancaktepe fiyat verisi",
+        sourceLabel:
+            `Doviz.com OPET ${city}/${district} fiyat verisi`,
         fallback: true
     };
 }

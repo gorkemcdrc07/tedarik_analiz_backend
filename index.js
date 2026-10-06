@@ -603,6 +603,9 @@ async function fetchOpetPriceFromDoviz(city, district, fuel) {
 async function fetchOpetPrice(city, district, fuel) {
     const baseUrl = "https://api.opet.com.tr/api";
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 6000);
+
     const headers = {
         "User-Agent": "Mozilla/5.0",
         "Accept": "application/json",
@@ -620,7 +623,7 @@ async function fetchOpetPrice(city, district, fuel) {
 
     const provinceResponse = await fetch(
         `${baseUrl}/fuelprices/provinces`,
-        { headers }
+        { headers, signal: controller.signal }
     );
 
     if (!provinceResponse.ok) {
@@ -651,7 +654,7 @@ async function fetchOpetPrice(city, district, fuel) {
         `${baseUrl}/fuelprices/prices?ProvinceCode=${encodeURIComponent(
             province.code
         )}&IncludeAllProducts=true`,
-        { headers }
+        { headers, signal: controller.signal }
     );
 
     if (!priceResponse.ok) {
@@ -717,6 +720,8 @@ async function fetchOpetPrice(city, district, fuel) {
     } catch (_) {
         // Fiyat bulunduysa son guncelleme bilgisi zorunlu degil.
     }
+
+    clearTimeout(timeoutId);
 
     return {
         price,
